@@ -1,14 +1,12 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-import tensorflow as tf
-from transformers import TFAutoModelForCausalLM, AutoTokenizer
 from fastapi.middleware.cors import CORSMiddleware
+from datasets import load_dataset
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 
-
-# Initialize FastAPI app
 app = FastAPI()
 
-# Enable CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -17,44 +15,32 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Load the saved model and tokenizer
+# Load the agriculture Q&A dataset and index the questions
 try:
-    loaded_model = TFAutoModelForCausalLM.from_pretrained("chatbot")
-    loaded_tokenizer = AutoTokenizer.from_pretrained("chatbot")
+    ds = load_dataset("KisanVaani/agriculture-qa-english-only")["train"]
+    questions = ds["question"]
+    answers = ds["answers"]
+    vectorizer = TfidfVectorizer(ngram_range=(1, 2), stop_words="english")
+    q_matrix = vectorizer.fit_transform(questions)
 except Exception as e:
-    raise RuntimeError(f"Failed to load the model or tokenizer: {str(e)}")
+    raise RuntimeError(f"Failed to load the dataset: {str(e)}")
 
-# Define request model
 class ChatRequest(BaseModel):
     user_input: str
-    context: str = "Agriculture-related information goes here"
+    context: str = ""  # kept so existing requests still validate; not used
 
-# Define chatbot response function
-def chatbot_response(user_input: str, context: str):
-    input_text = f"{context}\n\nUser: {user_input}\n\nChatbot:"
-    inputs = loaded_tokenizer(input_text, return_tensors="tf")
-    
-    output_sequences = loaded_model.generate(
-        input_ids=inputs["input_ids"],
-        max_length=100,
-        temperature=0.7,
-        top_k=50,
-        top_p=0.9,
-        do_sample=True
-    )
-    
-    response = loaded_tokenizer.decode(output_sequences[0], skip_special_tokens=True)
-    response = response.split("Chatbot:")[-1].strip()
-    
-    return response
+def chatbot_response(user_input: str) -> str:
+    scores = cosine_similarity(vectorizer.transform([user_input]), q_matrix)[0]
+    best = int(scores.argmax())
+    if scores[best] < 0.15:
+        return "Sorry, I couldn't find a good answer. Try rephrasing your farming question."
+    return answers[best]
 
-# API endpoint to get chatbot response
 @app.post("/chat")
 def chat(request: ChatRequest):
     try:
-        response = chatbot_response(request.user_input, request.context)
-        return {"response": response}
+        return {"response": chatbot_response(request.user_input)}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# Run the FastAPI app using: uvicorn app:app --reload
+# Run with: python -m uvicorn app:app --port 8000 --reload
